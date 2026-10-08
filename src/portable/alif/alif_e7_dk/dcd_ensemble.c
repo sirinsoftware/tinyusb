@@ -87,12 +87,8 @@ char logbuf[48];
 static uint32_t _evnt_buf[EVT_BUF_SIZE] CFG_TUSB_MEM_SECTION TU_ATTR_ALIGNED(4096);
 // Control buffer
 static uint8_t _ctrl_buf[CTRL_BUF_SIZE] CFG_TUSB_MEM_SECTION TU_ATTR_ALIGNED(32);
-// USB Transfer request Blocks
-// Each TRB (16 bytes) is padded to its own 32-byte D-cache line.
-// Why: when the DMA buffers are in cacheable memory (e.g. SRAM0 under Zephyr),
-// two TRBs sharing a line (EP0 OUT and EP0 IN) would corrupt each other: cleaning
-// one TRB writes back a stale copy of its neighbour over what the controller
-// wrote, and invalidating one discards the CPU's update of its neighbour.
+// USB Transfer request Blocks, one 16-byte TRB per 32-byte D-cache line so
+// cache maintenance on one TRB doesn't corrupt its neighbour
 static uint32_t _xfer_trb[2*TUP_DCD_ENDPOINT_MAX][8] CFG_TUSB_MEM_SECTION TU_ATTR_ALIGNED(32);
 // Transfer bytes
 static uint16_t _xfer_bytes[2*TUP_DCD_ENDPOINT_MAX];
@@ -100,22 +96,11 @@ static uint16_t _xfer_bytes[2*TUP_DCD_ENDPOINT_MAX];
 static volatile uint32_t *_evnt_tail = NULL;
 static bool _ctrl_long_data = false;
 static volatile bool _xfer_cfgd = false;
-// True while a control transfer is in progress: set when a SETUP packet
-// arrives, cleared on bus reset.
-// Why: lets dcd_edpt_xfer() drop EP0 requests that TinyUSB still issues for a
-// control transfer that a bus reset has already aborted.
+// Set on SETUP, cleared on bus reset: EP0 requests are dropped while false
 static volatile bool _ctrl_active = false;
-// Control status stage handshake, one bit per EP0 direction (PHY_EP0/PHY_EP1):
-// _sts_hw_ready - the controller requested the status stage (XferNotReady)
-// _sts_sw_ready - TinyUSB queued the status stage (zero-length dcd_edpt_xfer)
-// The status TRB is started only when both are set (_dcd_ctrl_status_ready).
-// Why: the status TRB used to be started as soon as XferNotReady arrived. For
-// SET_ADDRESS the host then got the ACK before dcd_set_address() had written
-// DCFG.DEVADDR, sent its next request to the new address and got no answer
-// ("device not accepting address", error -71). This happens whenever the USB
-// task is slow to handle the SETUP, e.g. in an RTOS thread or with logging.
-// It replaces the _sts_stage counter, which the ISR and the task both
-// modified without protection.
+// Status stage readiness, one bit per EP0 direction: the status TRB starts only
+// when both the controller (XferNotReady) and TinyUSB (zero-length xfer) asked
+// for it, so e.g. SET_ADDRESS isn't ACKed before DCFG.DEVADDR is written
 static volatile uint8_t _sts_hw_ready = 0;
 static volatile uint8_t _sts_sw_ready = 0;
 static uint16_t _ep_dir_out_mps[4] = {MAX_PACKET_SIZE, 0, 0, 0};
@@ -791,9 +776,7 @@ bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t t
 
     uint8_t ep = _ep_from_addr(ep_addr);
 
-    // Drop EP0 requests for a control transfer that a bus reset has aborted.
-    // Why: the USB task may still be handling events queued before the reset;
-    // queuing their data/status stages would disturb the next control transfer.
+    // Drop EP0 requests for a control transfer aborted by a bus reset
     if (ep < 2 && !_ctrl_active) {
         LOG(">%s ep%u dropped, control transfer aborted", __func__, ep);
         return true;
@@ -825,8 +808,7 @@ bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t t
                 }
                 _dcd_start_xfer(1, buffer, total_bytes, type);
             } else {
-                // TinyUSB queued STATUS IN (e.g. from dcd_set_address() after
-                // writing DCFG.DEVADDR); start it once the controller asked too
+                // STATUS IN, e.g. from dcd_set_address()
                 dcd_int_disable(rhport);
                 _dcd_ctrl_status_ready(PHY_EP1, false);
                 dcd_int_enable(rhport);
@@ -989,16 +971,13 @@ static void _dcd_handle_depevt(uint8_t rhport, uint8_t ep, uint8_t evt, uint8_t 
                     _sts_sw_ready = 0;
                     dcd_event_setup_received(rhport, _ctrl_buf, true);
                 } else if (trb->trbctl == TRBCTL_CTL_STAT3) {
+                    uint32_t len = 0; // STATUS OUT if no data was requested
                     if (_xfer_bytes[0] > 0) {
                         _dcd_invalidate_dcache((void*) trb->bptrl, _xfer_bytes[0]);
-                        dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_OUT),
-                                                _get_transfered_bytes(0),
-                                                XFER_RESULT_SUCCESS, true);
-                    } else {
-                        // STATUS OUT stage complete
-                        dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_OUT),
-                                                0, XFER_RESULT_SUCCESS, true);
+                        len = _get_transfered_bytes(0);
                     }
+                    dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_OUT),
+                                            len, XFER_RESULT_SUCCESS, true);
                 } else {
                     // invalid TRBCTL value
                     __BKPT(0);
@@ -1006,15 +985,9 @@ static void _dcd_handle_depevt(uint8_t rhport, uint8_t ep, uint8_t evt, uint8_t 
             } else if (ep == 1) {
                 trb_t *trb = (trb_t *)_xfer_trb[1];
                 LOG("ep1 xfer trb3 = %08x trb2 = %08x", _xfer_trb[1][3], _xfer_trb[1][2]);
-                if (trb->trbctl != TRBCTL_CTL_STAT2) {
-                    dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_IN),
-                                            _get_transfered_bytes(1),
-                                            XFER_RESULT_SUCCESS, true);
-                } else {
-                    // STATUS IN stage complete
-                    dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_IN),
-                                            0, XFER_RESULT_SUCCESS, true);
-                }
+                uint32_t len = (trb->trbctl == TRBCTL_CTL_STAT2) ? 0 : _get_transfered_bytes(1);
+                dcd_event_xfer_complete(rhport, tu_edpt_addr(0, TUSB_DIR_IN),
+                                        len, XFER_RESULT_SUCCESS, true);
             } else {
                 // TODO: check if ep is open
                 LOG("ep%u xfer trb3 = %08x trb2 = %08x", ep, _xfer_trb[ep][3], _xfer_trb[ep][2]);
@@ -1063,9 +1036,7 @@ static void _dcd_handle_depevt(uint8_t rhport, uint8_t ep, uint8_t evt, uint8_t 
                                         0, XFER_RESULT_SUCCESS, true);
             }
 
-            // XferNotReady for the status stage: the host started the status
-            // stage. Don't start the status TRB here directly, wait until
-            // TinyUSB has queued it too (see _sts_hw_ready)
+            // Controller is ready for the status stage, see _sts_hw_ready
             if ((ep < 2) &&
                 depevt_sts.xfernotready.stage == DEPEVT_XFERNOTREADY_STS_CTRLSTS) {
                 _dcd_ctrl_status_ready(ep, true);
@@ -1109,29 +1080,17 @@ static void _dcd_handle_devt(uint8_t rhport, uint8_t evt, uint16_t info) {
         case DEVT_USBRST: {
             LOG("USB reset");
 
-            // End active transfers and clear stalls on all non-control endpoints.
-            // Loops over physical endpoints (2 per endpoint number); the old
-            // loop stopped at TUP_DCD_ENDPOINT_MAX and skipped half of them.
-            // DEPCSTALL is issued directly: dcd_edpt_clear_stall() expects an
-            // endpoint address, not a physical endpoint index.
-            for (uint8_t ep = 2; ep < 2*TUP_DCD_ENDPOINT_MAX; ++ep) {
+            for (int ep = 2; ep < TUP_DCD_ENDPOINT_MAX; ++ep) {
                 if (_edpt[ep].xfer_active) {
                     _dcd_end_xfer(ep);
                 }
                 if (_edpt[ep].stalled) {
-                    _dcd_cmd_wait(ep, CMDTYP_DEPCSTALL, 0);
-                    _edpt[ep].stalled = false;
+                    dcd_edpt_clear_stall(rhport, ep);
                 }
             }
 
-            // Abort a control transfer still in progress and prepare EP0 for
-            // the next SETUP packet ("Setup a Control-Setup TRB / Start
-            // Transfer" state required by the controller after USB reset).
-            // Why: the Setup TRB was only re-armed from
-            // dcd_edpt0_status_complete(). TinyUSB drops its control state on
-            // bus reset, so for a transfer interrupted by the reset (Linux
-            // resets after the first GET_DESCRIPTOR) that never happened and
-            // the following SET_ADDRESS was never received.
+            // TinyUSB drops an interrupted control transfer on bus reset and
+            // won't re-arm the Setup TRB, so do it here
             _dcd_ctrl_restart();
 
             udev->dcfg_b.devaddr = 0;
@@ -1289,8 +1248,7 @@ static uint8_t _dcd_start_xfer(uint8_t ep, void* buf, uint32_t size, uint8_t typ
     // Issue the block command and pass the status
     uint8_t ret = _dcd_cmd_wait(ep, CMDTYP_DEPSTRTXFER, 0);
 
-    // Save the transfer resource index assigned by the controller.
-    // Why: DEPENDXFER needs it to end this transfer (see _dcd_ctrl_end_xfer)
+    // Save the transfer resource index, DEPENDXFER needs it
     if (!ret) {
         _edpt[ep].resource_idx = udev->depcmd[ep].depcmd_b.commandparam & DEPCMD_CMDPARAM_RES_ID_MASK;
     }
@@ -1363,9 +1321,7 @@ static uint8_t _dcd_start_xfer_isoc(uint8_t ep, void* buf, uint32_t size)
 
     if (!_edpt[ep].xfer_active && !ret) {
         _edpt[ep].xfer_active = true;
-        // Read the resource index from this endpoint's DEPCMD register
-        // (it was read from EP0's register, udev->depcmd->..., before)
-        _edpt[ep].resource_idx = udev->depcmd[ep].depcmd_b.commandparam & DEPCMD_CMDPARAM_RES_ID_MASK;
+        _edpt[ep].resource_idx = udev->depcmd->depcmd_b.commandparam & DEPCMD_CMDPARAM_RES_ID_MASK;
     }
 
     return ret;
@@ -1386,17 +1342,14 @@ static uint8_t _dcd_end_xfer(uint8_t ep)
     return ret;
 }
 
-// Check whether a Control-Setup TRB is already armed on EP0 (owned by the
-// controller and waiting for the next SETUP packet)
+// Check whether a Control-Setup TRB is owned by the controller
 static bool _dcd_ctrl_setup_armed(void) {
     trb_t *trb = (trb_t *)_xfer_trb[PHY_EP0];
     _dcd_invalidate_dcache(trb, sizeof(trb_t));
     return trb->hwo && (trb->trbctl == TRBCTL_CTL_SETUP);
 }
 
-// Arm the Control-Setup TRB on EP0 for the next SETUP packet.
-// Why the check: the USB reset handler may already have armed it; starting a
-// second transfer on the same TRB would overwrite a TRB owned by the controller.
+// Arm the Control-Setup TRB unless the USB reset handler already did
 static void _dcd_ctrl_arm_setup(void) {
     dcd_int_disable(TUD_OPT_RHPORT);
     _ctrl_long_data = false;
@@ -1406,8 +1359,7 @@ static void _dcd_ctrl_arm_setup(void) {
     dcd_int_enable(TUD_OPT_RHPORT);
 }
 
-// End a pending data or status stage TRB on EP0 OUT (PHY_EP0) or IN (PHY_EP1),
-// so that a new Control-Setup TRB can be started
+// End a pending data or status stage TRB on EP0 OUT or IN
 static void _dcd_ctrl_end_xfer(uint8_t ep) {
     trb_t *trb = (trb_t *)_xfer_trb[ep];
     _dcd_invalidate_dcache(trb, sizeof(trb_t));
@@ -1421,9 +1373,7 @@ static void _dcd_ctrl_end_xfer(uint8_t ep) {
     ugbl->guctl2_b.rst_actbitlater = 0;
 }
 
-// Abort the control transfer interrupted by a bus reset and return EP0 to the
-// Setup stage: end pending EP0 TRBs, stall EP0 and arm a new Control-Setup TRB.
-// Called from the ISR on USB reset (DEVT_USBRST).
+// Abort the control transfer in progress and re-arm the Setup TRB (USB reset)
 static void _dcd_ctrl_restart(void) {
     _ctrl_active = false;
     _ctrl_long_data = false;
@@ -1437,16 +1387,14 @@ static void _dcd_ctrl_restart(void) {
     _dcd_ctrl_end_xfer(PHY_EP1);
     _dcd_ctrl_end_xfer(PHY_EP0);
 
-    // Stalling EP0 returns the controller's control state machine to the Setup
-    // stage; the stall is cleared automatically by the next SETUP packet
+    // Stall returns the control state machine to the Setup stage, the next
+    // SETUP packet clears it
     _dcd_cmd_wait(PHY_EP0, CMDTYP_DEPSSTALL, 0);
     _dcd_start_xfer(PHY_EP0, _ctrl_buf, SETUP_PACKET_SIZE, TRBCTL_CTL_SETUP);
 }
 
-// Record that the controller (from_hw = true, XferNotReady) or TinyUSB
-// (from_hw = false, zero-length dcd_edpt_xfer) is ready for the status stage on
-// EP0 OUT or IN, and start the status TRB once both are (see _sts_hw_ready).
-// Must be called from the ISR or with the USB interrupt disabled.
+// Mark the status stage on EP0 OUT or IN ready from the controller or TinyUSB
+// side and start it once both are. Call with the USB interrupt disabled.
 static void _dcd_ctrl_status_ready(uint8_t ep, bool from_hw) {
     uint8_t mask = (uint8_t) (1u << ep);
 
@@ -1456,7 +1404,7 @@ static void _dcd_ctrl_status_ready(uint8_t ep, bool from_hw) {
         _sts_sw_ready |= mask;
     }
 
-    if (!((_sts_hw_ready & mask) && (_sts_sw_ready & mask))) {
+    if (!(_sts_hw_ready & _sts_sw_ready & mask)) {
         return;
     }
 
