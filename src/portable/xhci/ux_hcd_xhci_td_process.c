@@ -197,6 +197,7 @@ int32_t process_bulk_intr_td(
             *status = 0;
             break;
         case COMP_SHORT_PACKET:
+            ep_ring->err_count = 0;
             *status = 0;
             break;
         case COMP_STOPPED_SHORT_PACKET:
@@ -209,7 +210,11 @@ int32_t process_bulk_intr_td(
             break;
         case COMP_USB_TRANSACTION_ERROR:
             if ((ep_ring->err_count++ > MAX_SOFT_RETRY) || ((slot_ctx->tt_info) & TT_SLOT))
+            {
+                /* give up, next TD gets its own retries */
+                ep_ring->err_count = 0;
                 break;
+            }
             *status = 0;
             _ux_hcd_xhci_cleanup_halted_endpoint(xhci, slot_id, ep_index, ep_ring->stream_id, td, EP_SOFT_RESET);
             if(td->urb->ux_transfer_request_completion_code)

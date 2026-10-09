@@ -2099,12 +2099,13 @@ int32_t _ux_hcd_xhci_queue_reset_ep(UX_HCD_XHCI *xhci, UX_XHCI_COMMAND *cmd, uin
     uint32_t trb_ep_index = EP_ID_FOR_TRB(ep_index);
     uint32_t type = TRB_TYPE(TRB_RESET_EP);
     UX_XHCI_TRB_INFO  trb_info;
+    /* soft reset preserves the transfer state, must be set before the TRB is filled */
+    if (reset_type == EP_SOFT_RESET)
+        type |= TRB_TSP;
     trb_info.low_address = 0;
     trb_info.high_address = 0;
     trb_info.size = 0;
     trb_info.cntrl_field = trb_slot_id | trb_ep_index | type;
-    if (reset_type == EP_SOFT_RESET)
-        type |= TRB_TSP;
     /* Queue the command */
     return queue_command(xhci, cmd, &trb_info, false);
 }

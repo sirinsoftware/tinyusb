@@ -223,6 +223,29 @@ static uint8_t dma_buf[UX_DEMO_NS_SIZE] CFG_TUH_MEM_SECTION TU_ATTR_ALIGNED(128)
 
 extern TX_EVENT_FLAGS_GROUP CONTROL_EP_FLAG;
 
+// On USB Transaction Error the xHCI layer soft-resets a bulk/interrupt endpoint and retries
+// the TD (see process_bulk_intr_td()), so the transfer is not complete yet.
+// Must be called before the event is handled.
+static bool _tuh_xhci_soft_retry_pending(UX_HCD_XHCI *xhci, uint32_t slot_id, int32_t ep_index,
+                                         uint32_t trb_comp_code)
+{
+    if ((trb_comp_code != COMP_USB_TRANSACTION_ERROR) || (ep_index <= 0))
+        return false;
+
+    UX_XHCI_VIRT_DEVICE *vdev = xhci->devs[slot_id];
+    if (!vdev)
+        return false;
+
+    UX_XHCI_RING *ring = vdev->eps[ep_index].ring;
+    if (!ring || ((ring->type != TYPE_BULK) && (ring->type != TYPE_INTR)))
+        return false;
+
+    UX_XHCI_SLOT_CTX *slot_ctx = _ux_hcd_xhci_get_slot_ctx(xhci, vdev->out_ctx);
+
+    // same condition as process_bulk_intr_td() before err_count is incremented
+    return (ring->err_count <= MAX_SOFT_RETRY) && !((slot_ctx->tt_info) & TT_SLOT);
+}
+
 static uint8_t _tuh_xhci_get_ep_addr(uint32_t ep_index)
 {
     if (ep_index == 0) return 0; //Control endpoint
@@ -273,6 +296,8 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   disable_usb_phy_isolation();
   // clear usb phy power-on-reset signal
   CLKCTL_PER_MST->USB_CTRL2 &= ~(1 << 8);
+  // frame length adjustment: xHCI default 0x20 for 125 us microframes, resets to 0
+  CLKCTL_PER_MST->USB_CTRL2 = (CLKCTL_PER_MST->USB_CTRL2 & ~0x3FU) | 0x20U;
 
   _hcd_busy_wait(50000);
   host_ugbl->gctl_b.coresoftreset = 1;
@@ -447,6 +472,10 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
               //hcd_event_xfer_complete(0, 0, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //hcd_event_xfer_complete(hcchar_bm->dev_addr, ep_addr, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //FIXME: may be we shall pass original_length - EVENT_TRB_LEN(event->trans_event.transfer_len) ?
+              if (_tuh_xhci_soft_retry_pending(xhci, slot_id, ep_index, trb_comp_code))
+              {
+                  break;
+              }
               hcd_event_xfer_complete(slot->dev_addr, ep_addr, slot->buflen - EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
 
               break;
