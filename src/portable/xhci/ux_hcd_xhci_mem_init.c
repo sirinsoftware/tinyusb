@@ -1272,9 +1272,7 @@ int32_t _ux_hcd_xhci_endpoint_init(UX_HCD_XHCI *xhci, UX_XHCI_VIRT_DEVICE *virt_
             max_packet = 512;
         if (udev->ux_device_speed == UX_FULL_SPEED_DEVICE)
         {
-            /* round down to a power of two */
-            while (max_packet & (max_packet - 1))
-                max_packet &= max_packet - 1;
+            max_packet = max_packet * max_packet;
             max_packet = clamp_val(max_packet, 8, 64);
         }
     }

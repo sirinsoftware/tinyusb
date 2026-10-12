@@ -61,7 +61,6 @@ typedef struct {
 
   // SCSI command data
   uint8_t stage;
-  bool xfer_failed; // data stage failed
   void* buffer;
   tuh_msc_complete_cb_t complete_cb;
   uintptr_t complete_arg;
@@ -147,8 +146,6 @@ bool tuh_msc_scsi_command(uint8_t daddr, msc_cbw_t const* cbw, void* data,
   msch_epbuf_t* epbuf = get_epbuf(daddr);
 
   epbuf->cbw = *cbw;
-  tu_memclr(&epbuf->csw, sizeof(msc_csw_t)); // don't take a stale CSW as status
-  p_msc->xfer_failed = false;
   p_msc->buffer = data;
   p_msc->complete_cb = complete_cb;
   p_msc->complete_arg = arg;
@@ -333,12 +330,7 @@ bool msch_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t event, uint32
   switch (p_msc->stage) {
     case MSC_STAGE_CMD:
       // Must be Command Block
-      TU_ASSERT(ep_addr == p_msc->ep_out);
-      if (event != XFER_RESULT_SUCCESS || xferred_bytes != sizeof(msc_cbw_t)) {
-        // no data and status stage follow, complete with error
-        p_msc->stage = MSC_STAGE_STATUS;
-        return msch_xfer_cb(dev_addr, p_msc->ep_in, XFER_RESULT_FAILED, 0);
-      }
+      TU_ASSERT(ep_addr == p_msc->ep_out && event == XFER_RESULT_SUCCESS && xferred_bytes == sizeof(msc_cbw_t));
       if (cbw->total_bytes && p_msc->buffer) {
         // Data stage if any
         p_msc->stage = MSC_STAGE_DATA;
@@ -350,10 +342,6 @@ bool msch_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t event, uint32
       TU_ATTR_FALLTHROUGH; // fallthrough to status stage
 
     case MSC_STAGE_DATA:
-      if (p_msc->stage == MSC_STAGE_DATA && event != XFER_RESULT_SUCCESS) {
-        p_msc->xfer_failed = true;
-      }
-
       // Status stage
       p_msc->stage = MSC_STAGE_STATUS;
       TU_ASSERT(usbh_edpt_xfer(dev_addr, p_msc->ep_in, (uint8_t*) csw, (uint16_t) sizeof(msc_csw_t)));
@@ -362,13 +350,6 @@ bool msch_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t event, uint32
     case MSC_STAGE_STATUS:
       // SCSI op is complete
       p_msc->stage = MSC_STAGE_IDLE;
-
-      if (event != XFER_RESULT_SUCCESS || xferred_bytes != sizeof(msc_csw_t) ||
-          csw->signature != MSC_CSW_SIGNATURE || csw->tag != cbw->tag) {
-        csw->status = MSC_CSW_STATUS_PHASE_ERROR;
-      } else if (p_msc->xfer_failed && csw->status == MSC_CSW_STATUS_PASSED) {
-        csw->status = MSC_CSW_STATUS_FAILED;
-      }
 
       if (p_msc->complete_cb) {
         tuh_msc_complete_data_t const cb_data = {
