@@ -223,29 +223,6 @@ static uint8_t dma_buf[UX_DEMO_NS_SIZE] CFG_TUH_MEM_SECTION TU_ATTR_ALIGNED(128)
 
 extern TX_EVENT_FLAGS_GROUP CONTROL_EP_FLAG;
 
-// On USB Transaction Error the xHCI layer soft-resets a bulk/interrupt endpoint and retries
-// the TD (see process_bulk_intr_td()), so the transfer is not complete yet.
-// Must be called before the event is handled.
-static bool _tuh_xhci_soft_retry_pending(UX_HCD_XHCI *xhci, uint32_t slot_id, int32_t ep_index,
-                                         uint32_t trb_comp_code)
-{
-    if ((trb_comp_code != COMP_USB_TRANSACTION_ERROR) || (ep_index <= 0))
-        return false;
-
-    UX_XHCI_VIRT_DEVICE *vdev = xhci->devs[slot_id];
-    if (!vdev)
-        return false;
-
-    UX_XHCI_RING *ring = vdev->eps[ep_index].ring;
-    if (!ring || ((ring->type != TYPE_BULK) && (ring->type != TYPE_INTR)))
-        return false;
-
-    UX_XHCI_SLOT_CTX *slot_ctx = _ux_hcd_xhci_get_slot_ctx(xhci, vdev->out_ctx);
-
-    // same condition as process_bulk_intr_td() before err_count is incremented
-    return (ring->err_count <= MAX_SOFT_RETRY) && !((slot_ctx->tt_info) & TT_SLOT);
-}
-
 static uint8_t _tuh_xhci_get_ep_addr(uint32_t ep_index)
 {
     if (ep_index == 0) return 0; //Control endpoint
