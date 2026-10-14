@@ -273,6 +273,8 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   disable_usb_phy_isolation();
   // clear usb phy power-on-reset signal
   CLKCTL_PER_MST->USB_CTRL2 &= ~(1 << 8);
+  // frame length adjustment: xHCI default 0x20 for 125 us microframes, resets to 0
+  CLKCTL_PER_MST->USB_CTRL2 = (CLKCTL_PER_MST->USB_CTRL2 & ~0x3FU) | 0x20U;
 
   _hcd_busy_wait(50000);
   host_ugbl->gctl_b.coresoftreset = 1;
@@ -447,6 +449,7 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
               //hcd_event_xfer_complete(0, 0, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //hcd_event_xfer_complete(hcchar_bm->dev_addr, ep_addr, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //FIXME: may be we shall pass original_length - EVENT_TRB_LEN(event->trans_event.transfer_len) ?
+              
               hcd_event_xfer_complete(slot->dev_addr, ep_addr, slot->buflen - EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
 
               break;

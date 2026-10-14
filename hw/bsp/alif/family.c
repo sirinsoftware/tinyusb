@@ -28,12 +28,28 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 #endif
 
+#if CFG_TUSB_OS == OPT_OS_NONE || CFG_TUSB_OS == OPT_OS_FREERTOS
+// With a callback registered receive_str() doesn't wait for data: keep a 1-byte
+// receive armed and queue received bytes for board_uart_read(). Power of two size.
+#define UART_RX_FIFO_SIZE 64
+static uint8_t _uart_rx_byte;
+static uint8_t _uart_rx_fifo[UART_RX_FIFO_SIZE];
+static volatile uint32_t _uart_rx_wr = 0;
+static volatile uint32_t _uart_rx_rd = 0;
+
 /**
- * @brief This CB required to make receive_str() function ublocking
+ * @brief UART event callback, called from the UART interrupt
  */
 void tracelib_cb(uint32_t event) {
-    (void) event;
+    if (event & ARM_USART_EVENT_RECEIVE_COMPLETE) {
+        if ((_uart_rx_wr - _uart_rx_rd) < UART_RX_FIFO_SIZE) {
+            _uart_rx_fifo[_uart_rx_wr % UART_RX_FIFO_SIZE] = _uart_rx_byte;
+            _uart_rx_wr++;
+        }
+        receive_str((char *) &_uart_rx_byte, 1);
+    }
 }
+#endif
 
 /**
  * @brief Board init: configure LED and button pins
@@ -69,9 +85,10 @@ void board_init(void) {
     button_port->PowerControl(BOARD_JOY_SW_CENTER_GPIO_PIN, ARM_POWER_FULL);
     button_port->SetDirection(BOARD_JOY_SW_CENTER_GPIO_PIN, GPIO_PIN_DIRECTION_INPUT);
    
-    // Initialize serial output
+    // Initialize serial output and input
     tracelib_init(NULL, tracelib_cb);
-    
+    receive_str((char *) &_uart_rx_byte, 1);
+
 #endif
 
 #if CFG_TUSB_OS == OPT_OS_ZEPHYR
@@ -127,8 +144,12 @@ uint32_t board_button_read(void) {
  * @brief UART read handler
  */
 int board_uart_read(uint8_t* buf, int len) {
-    int ret = receive_str((char *) buf, len);
-    return (ret == ARM_DRIVER_OK) ? len : 0;
+    int count = 0;
+    while ((count < len) && (_uart_rx_rd != _uart_rx_wr)) {
+        buf[count++] = _uart_rx_fifo[_uart_rx_rd % UART_RX_FIFO_SIZE];
+        _uart_rx_rd++;
+    }
+    return count;
 }
 
 /**
