@@ -449,7 +449,6 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
               //hcd_event_xfer_complete(0, 0, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //hcd_event_xfer_complete(hcchar_bm->dev_addr, ep_addr, EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
               //FIXME: may be we shall pass original_length - EVENT_TRB_LEN(event->trans_event.transfer_len) ?
-              
               hcd_event_xfer_complete(slot->dev_addr, ep_addr, slot->buflen - EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
 
               break;
