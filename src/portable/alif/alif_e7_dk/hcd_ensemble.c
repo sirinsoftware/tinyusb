@@ -57,7 +57,8 @@ typedef struct {
     uint8_t                 dev_addr;
     uint8_t                 setup_packet[8];
     //uint8_t                 *buffer;
-    uint32_t                buflen;
+    uint32_t                buflen;         // control endpoint requested length
+    uint32_t                ep_buflen[31];  // requested length per xHCI ep_index (non-control endpoints)
     tuh_xhci_slot_state_t   state;
     UX_ENDPOINT             *first_edpt;
 } tuh_xhci_slot_t;
@@ -423,7 +424,15 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
       printf("flags=0x%lx\r\n", event->trans_event.flags);
 #endif
 
-      switch (slot->state)
+      // Bulk/interrupt endpoints of the same device can be in flight concurrently (e.g. CDC keeps
+      // an IN transfer pending while OUT transfers are submitted), so their requested length is
+      // tracked per endpoint. Only the control endpoint uses slot->buflen and slot->state.
+      TU_ASSERT(ep_index >= 0 && ep_index < (int32_t) TU_ARRAY_SIZE(slot->ep_buflen),);
+      if (ep_index != 0)
+      {
+          hcd_event_xfer_complete(slot->dev_addr, ep_addr, slot->ep_buflen[ep_index] - EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
+      }
+      else switch (slot->state)
       {
           case TUH_XHCI_SLOT_STATE_CONTROL_DATA:
 #ifdef DEBUG
@@ -996,7 +1005,10 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t * 
 
       UX_TRANSFER     *transfer_request =  &ep -> ux_endpoint_transfer_request;
 
-      slot->buflen = buflen;
+      // xHCI ep_index = DCI - 1, DCI = ep_num * 2 + (IN ? 1 : 0)
+      const uint32_t ep_index = tu_edpt_number(ep_addr) * 2u + (tu_edpt_dir(ep_addr) == TUSB_DIR_IN ? 1u : 0u) - 1u;
+      TU_ASSERT(ep_index < TU_ARRAY_SIZE(slot->ep_buflen));
+      slot->ep_buflen[ep_index] = buflen;
 
       transfer_request -> ux_transfer_request_data_pointer =      buffer;
       transfer_request -> ux_transfer_request_requested_length =  buflen;

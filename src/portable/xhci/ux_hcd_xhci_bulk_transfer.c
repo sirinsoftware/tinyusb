@@ -142,9 +142,20 @@ int32_t _ux_hcd_xhci_bulk_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *urb, 
         /* Set the TRB length, TD size, and interrupter fields. */
         remainder = _ux_hcd_xhci_td_remainder(xhci, enqd_len, trb_buff_len, full_len, urb, more_trbs_coming);
         length_field = TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
-        RTSS_CleanDCache_by_Addr((void *)send_addr, urb->ux_transfer_request_requested_length);
-        trb_info.low_address = LocalToGlobal((void *)lower_32_bits(send_addr));
-        trb_info.high_address = LocalToGlobal((void *)upper_32_bits(send_addr));
+        if (field & TRB_IDT)
+        {
+            /* Immediate Data: the TRB parameter field carries the payload itself, not its address */
+            uint64_t idt_data = 0;
+            memcpy(&idt_data, (void *) lower_32_bits(send_addr), trb_buff_len);
+            trb_info.low_address = lower_32_bits(idt_data);
+            trb_info.high_address = upper_32_bits(idt_data);
+        }
+        else
+        {
+            RTSS_CleanDCache_by_Addr((void *)send_addr, urb->ux_transfer_request_requested_length);
+            trb_info.low_address = LocalToGlobal((void *)lower_32_bits(send_addr));
+            trb_info.high_address = LocalToGlobal((void *)upper_32_bits(send_addr));
+        }
         trb_info.size =  length_field;
         trb_info.cntrl_field = field;
         queue_trb(xhci, ring, more_trbs_coming | need_zero_pkt, &trb_info);
