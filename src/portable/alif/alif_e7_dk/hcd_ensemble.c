@@ -273,6 +273,8 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   disable_usb_phy_isolation();
   // clear usb phy power-on-reset signal
   CLKCTL_PER_MST->USB_CTRL2 &= ~(1 << 8);
+  // frame length adjustment: xHCI default 0x20 for 125 us microframes, resets to 0
+  CLKCTL_PER_MST->USB_CTRL2 = (CLKCTL_PER_MST->USB_CTRL2 & ~0x3FU) | 0x20U;
 
   _hcd_busy_wait(50000);
   host_ugbl->gctl_b.coresoftreset = 1;
