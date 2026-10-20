@@ -128,9 +128,8 @@ int32_t _ux_hcd_xhci_control_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *ur
     {
         uint32_t length_field, remainder;
         uint64_t addr = 0;
-        bool idt = _ux_hcd_xhci_urb_suitable_for_idt(urb);
 
-        if (idt)
+        if (_ux_hcd_xhci_urb_suitable_for_idt(urb))
         {
             memcpy(&addr, urb->ux_transfer_request_data_pointer, urb->ux_transfer_request_requested_length);
             field |= TRB_IDT;
@@ -145,11 +144,8 @@ int32_t _ux_hcd_xhci_control_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *ur
             TRB_INTR_TARGET(0);
         if ((urb -> ux_transfer_request_type & UX_REQUEST_DIRECTION ) == UX_REQUEST_IN)
             field |= TRB_DIR_IN;
-        if (idt)
+        if (field & TRB_IDT)
         {
-            /* Immediate Data: addr holds the payload (e.g. CP210x SET_BAUDRATE, CDC SET_LINE_CODING),
-             * not an address - LocalToGlobal() would corrupt it (115200 = 0x0001C200 is in the ITCM range).
-             */
             trb_info.low_address = lower_32_bits(addr);
             trb_info.high_address = upper_32_bits(addr);
         }

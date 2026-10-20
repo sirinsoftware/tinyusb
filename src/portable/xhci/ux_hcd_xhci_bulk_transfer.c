@@ -144,7 +144,6 @@ int32_t _ux_hcd_xhci_bulk_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *urb, 
         length_field = TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
         if (field & TRB_IDT)
         {
-            /* Immediate Data: the TRB parameter field carries the payload itself, not its address */
             uint64_t idt_data = 0;
             memcpy(&idt_data, (void *) lower_32_bits(send_addr), trb_buff_len);
             trb_info.low_address = lower_32_bits(idt_data);

@@ -57,8 +57,8 @@ typedef struct {
     uint8_t                 dev_addr;
     uint8_t                 setup_packet[8];
     //uint8_t                 *buffer;
-    uint32_t                buflen;         // control endpoint requested length
-    uint32_t                ep_buflen[31];  // requested length per xHCI ep_index (non-control endpoints)
+    uint32_t                buflen;
+    uint32_t                ep_buflen[31];
     tuh_xhci_slot_state_t   state;
     UX_ENDPOINT             *first_edpt;
 } tuh_xhci_slot_t;
@@ -232,6 +232,11 @@ static uint8_t _tuh_xhci_get_ep_addr(uint32_t ep_index)
     uint8_t ep_dir = (ep_index + 1) % 2;
 
     return (ep_num | (ep_dir ? 0x80 : 0x00));
+}
+
+static uint32_t _tuh_xhci_get_ep_index(uint8_t ep_addr)
+{
+    return tu_edpt_number(ep_addr) * 2u + (tu_edpt_dir(ep_addr) == TUSB_DIR_IN ? 1u : 0u) - 1u;
 }
 
 // optional hcd configuration, called by tuh_configure()
@@ -424,9 +429,6 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
       printf("flags=0x%lx\r\n", event->trans_event.flags);
 #endif
 
-      // Bulk/interrupt endpoints of the same device can be in flight concurrently (e.g. CDC keeps
-      // an IN transfer pending while OUT transfers are submitted), so their requested length is
-      // tracked per endpoint. Only the control endpoint uses slot->buflen and slot->state.
       TU_ASSERT(ep_index >= 0 && ep_index < (int32_t) TU_ARRAY_SIZE(slot->ep_buflen),);
       if (ep_index != 0)
       {
@@ -853,10 +855,6 @@ bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const 
             //Here opening device after SET_ADDRESS command
             TU_ASSERT(slot->state == TUH_XHCI_SLOT_STATE_SET_ADDRESS);
 
-            // TinyUSB re-opens EP0 with the real bMaxPacketSize0 after reading the device descriptor.
-            // The control endpoint was created with the default (8 for LS/FS, 64 for HS); update it so
-            // _ux_hcd_xhci_check_maxpacket() issues an Evaluate Context on the next control transfer.
-            // Without this a FS device with a 64-byte EP0 (e.g. CP210x) babbles on any IN data > 8 bytes.
             TU_ASSERT(_created_device != NULL);
             _created_device->ux_device_control_endpoint.ux_endpoint_descriptor.wMaxPacketSize = tu_edpt_packet_size(ep_desc);
 
@@ -1012,8 +1010,7 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t * 
 
       UX_TRANSFER     *transfer_request =  &ep -> ux_endpoint_transfer_request;
 
-      // xHCI ep_index = DCI - 1, DCI = ep_num * 2 + (IN ? 1 : 0)
-      const uint32_t ep_index = tu_edpt_number(ep_addr) * 2u + (tu_edpt_dir(ep_addr) == TUSB_DIR_IN ? 1u : 0u) - 1u;
+      const uint32_t ep_index = _tuh_xhci_get_ep_index(ep_addr);
       TU_ASSERT(ep_index < TU_ARRAY_SIZE(slot->ep_buflen));
       slot->ep_buflen[ep_index] = buflen;
 
