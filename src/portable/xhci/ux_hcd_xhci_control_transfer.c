@@ -127,9 +127,10 @@ int32_t _ux_hcd_xhci_control_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *ur
     if (urb->ux_transfer_request_requested_length > 0)
     {
         uint32_t length_field, remainder;
-        uint64_t addr;
+        uint64_t addr = 0;
+        bool idt = _ux_hcd_xhci_urb_suitable_for_idt(urb);
 
-        if (_ux_hcd_xhci_urb_suitable_for_idt(urb))
+        if (idt)
         {
             memcpy(&addr, urb->ux_transfer_request_data_pointer, urb->ux_transfer_request_requested_length);
             field |= TRB_IDT;
@@ -144,9 +145,20 @@ int32_t _ux_hcd_xhci_control_transfer_request(UX_HCD_XHCI *xhci, UX_TRANSFER *ur
             TRB_INTR_TARGET(0);
         if ((urb -> ux_transfer_request_type & UX_REQUEST_DIRECTION ) == UX_REQUEST_IN)
             field |= TRB_DIR_IN;
-        RTSS_CleanDCache_by_Addr((void *)addr, urb->ux_transfer_request_requested_length);
-        trb_info.low_address = LocalToGlobal((void *)lower_32_bits(addr));
-        trb_info.high_address = LocalToGlobal((void *)upper_32_bits(addr));
+        if (idt)
+        {
+            /* Immediate Data: addr holds the payload (e.g. CP210x SET_BAUDRATE, CDC SET_LINE_CODING),
+             * not an address - LocalToGlobal() would corrupt it (115200 = 0x0001C200 is in the ITCM range).
+             */
+            trb_info.low_address = lower_32_bits(addr);
+            trb_info.high_address = upper_32_bits(addr);
+        }
+        else
+        {
+            RTSS_CleanDCache_by_Addr((void *)addr, urb->ux_transfer_request_requested_length);
+            trb_info.low_address = LocalToGlobal((void *)lower_32_bits(addr));
+            trb_info.high_address = LocalToGlobal((void *)upper_32_bits(addr));
+        }
         trb_info.size =  length_field;
         trb_info.cntrl_field = field | ep_ring->cycle_state;
         /* Queue the DATA stage TRB  */

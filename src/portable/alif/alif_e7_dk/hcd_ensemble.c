@@ -853,6 +853,13 @@ bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const 
             //Here opening device after SET_ADDRESS command
             TU_ASSERT(slot->state == TUH_XHCI_SLOT_STATE_SET_ADDRESS);
 
+            // TinyUSB re-opens EP0 with the real bMaxPacketSize0 after reading the device descriptor.
+            // The control endpoint was created with the default (8 for LS/FS, 64 for HS); update it so
+            // _ux_hcd_xhci_check_maxpacket() issues an Evaluate Context on the next control transfer.
+            // Without this a FS device with a 64-byte EP0 (e.g. CP210x) babbles on any IN data > 8 bytes.
+            TU_ASSERT(_created_device != NULL);
+            _created_device->ux_device_control_endpoint.ux_endpoint_descriptor.wMaxPacketSize = tu_edpt_packet_size(ep_desc);
+
             slot->state = TUH_XHCI_SLOT_STATE_OPENED;
         }
         else
