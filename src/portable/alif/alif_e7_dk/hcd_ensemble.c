@@ -58,6 +58,7 @@ typedef struct {
     uint8_t                 setup_packet[8];
     //uint8_t                 *buffer;
     uint32_t                buflen;
+    uint32_t                ep_buflen[31];
     tuh_xhci_slot_state_t   state;
     UX_ENDPOINT             *first_edpt;
 } tuh_xhci_slot_t;
@@ -231,6 +232,11 @@ static uint8_t _tuh_xhci_get_ep_addr(uint32_t ep_index)
     uint8_t ep_dir = (ep_index + 1) % 2;
 
     return (ep_num | (ep_dir ? 0x80 : 0x00));
+}
+
+static uint32_t _tuh_xhci_get_ep_index(uint8_t ep_addr)
+{
+    return tu_edpt_number(ep_addr) * 2u + (tu_edpt_dir(ep_addr) == TUSB_DIR_IN ? 1u : 0u) - 1u;
 }
 
 // optional hcd configuration, called by tuh_configure()
@@ -423,7 +429,12 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
       printf("flags=0x%lx\r\n", event->trans_event.flags);
 #endif
 
-      switch (slot->state)
+      TU_ASSERT(ep_index >= 0 && ep_index < (int32_t) TU_ARRAY_SIZE(slot->ep_buflen),);
+      if (ep_index != 0)
+      {
+          hcd_event_xfer_complete(slot->dev_addr, ep_addr, slot->ep_buflen[ep_index] - EVENT_TRB_LEN(event->trans_event.transfer_len), xfer_result, true);
+      }
+      else switch (slot->state)
       {
           case TUH_XHCI_SLOT_STATE_CONTROL_DATA:
 #ifdef DEBUG
@@ -843,6 +854,9 @@ bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const 
             //Here opening device after SET_ADDRESS command
             TU_ASSERT(slot->state == TUH_XHCI_SLOT_STATE_SET_ADDRESS);
 
+            TU_ASSERT(_created_device != NULL);
+            _created_device->ux_device_control_endpoint.ux_endpoint_descriptor.wMaxPacketSize = tu_edpt_packet_size(ep_desc);
+
             slot->state = TUH_XHCI_SLOT_STATE_OPENED;
         }
         else
@@ -995,7 +1009,9 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t * 
 
       UX_TRANSFER     *transfer_request =  &ep -> ux_endpoint_transfer_request;
 
-      slot->buflen = buflen;
+      const uint32_t ep_index = _tuh_xhci_get_ep_index(ep_addr);
+      TU_ASSERT(ep_index < TU_ARRAY_SIZE(slot->ep_buflen));
+      slot->ep_buflen[ep_index] = buflen;
 
       transfer_request -> ux_transfer_request_data_pointer =      buffer;
       transfer_request -> ux_transfer_request_requested_length =  buflen;
